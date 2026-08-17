@@ -3,7 +3,9 @@ services:
     runtime: node
     name: timegen-ai
     plan: free
-    buildCommand: npm ci && npm run build
+    # NODE_ENV=production is required at runtime, but Vite and esbuild are
+    # development dependencies and must still be installed for the build.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:

@@ -99,7 +99,7 @@ JSON development store is intentionally unavailable there.
 ### 5. Deploy on Render
 
 Use **New → Blueprint** in Render and select this repository. The included
-`render.yaml` runs `npm ci && npm run build`, starts the compiled Express
+`render.yaml` runs `npm ci --include=dev && npm run build`, starts the compiled Express
 server, and checks `/api/health`. Add `MONGODB_URI`, `DATABASE_NAME`, and
 `GEMINI_API_KEY` as secret environment variables before deploying. Set
 `REQUIRE_MONGODB=true` so a database configuration problem fails clearly
