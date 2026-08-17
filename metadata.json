@@ -1,0 +1,6 @@
+{
+  "name": "TimeGen AI",
+  "description": "AI-Powered College Timetable Generator with constraint solver, batch calculation, resource management, conflict validation, and AI assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
