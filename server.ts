@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import { initDatabase, db, isMongoDBConnected } from './backend/database/store';
 import { solveTimetable, generateTimeSlots, generateBatchesForClass } from './backend/scheduler/solver';
 import { validateTimetable } from './backend/scheduler/validator';
@@ -568,6 +567,7 @@ export async function createApp() {
 
   // Vite middleware for dev or static server for production
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
