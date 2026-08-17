@@ -78,6 +78,33 @@ npm run build
 npm run start
 ```
 
+### 4. Deploy Frontend and API on Vercel
+
+This project deploys as one Vercel project: Vite serves the React frontend and
+`api/index.ts` serves the Express API as a serverless function. Before
+deploying, add these environment variables in **Vercel → Project Settings →
+Environment Variables**:
+
+```env
+MONGODB_URI="mongodb+srv://<username>:<password>@<cluster-url>/timegen_ai?retryWrites=true&w=majority"
+DATABASE_NAME="timegen_ai"
+GEMINI_API_KEY="your-gemini-api-key"
+```
+
+Then import the GitHub repository in Vercel and deploy. `vercel.json` routes
+all `/api/*` requests to the Express serverless function and routes frontend
+paths to the React application. MongoDB Atlas is required on Vercel; the local
+JSON development store is intentionally unavailable there.
+
+### 5. Deploy on Render
+
+Use **New → Blueprint** in Render and select this repository. The included
+`render.yaml` runs `npm ci && npm run build`, starts the compiled Express
+server, and checks `/api/health`. Add `MONGODB_URI`, `DATABASE_NAME`, and
+`GEMINI_API_KEY` as secret environment variables before deploying. Set
+`REQUIRE_MONGODB=true` so a database configuration problem fails clearly
+instead of falling back to temporary local storage.
+
 ---
 
 ## 💡 Quick Tips

@@ -1,0 +1,19 @@
+services:
+  - type: web
+    runtime: node
+    name: timegen-ai
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: REQUIRE_MONGODB
+        value: "true"
+      - key: MONGODB_URI
+        sync: false
+      - key: DATABASE_NAME
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

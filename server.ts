@@ -9,9 +9,10 @@ import { seedDatabase } from './backend/seed/demoData';
 import { processAIChat, explainConflictAI } from './backend/ai/assistant';
 import { Classroom, Lab, StudentClass, Teacher, Subject, ClassSubject, AvailabilityRule, TimetableEntry } from './src/types';
 
-async function startServer() {
+// Creates the shared Express application. It is used by the local Node server
+// and by Vercel's serverless API entrypoint.
+export async function createApp() {
   const app = express();
-  const PORT = 3000;
 
   app.use(express.json());
 
@@ -580,9 +581,20 @@ async function startServer() {
     });
   }
 
+  return app;
+}
+
+export async function startServer() {
+  const app = await createApp();
+  // Render provides the public port through PORT; fall back to 3000 locally.
+  const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+// Vercel imports createApp from api/index.ts. Starting a listener there would
+// leave API routes unavailable, so only start one outside the Vercel runtime.
+if (process.env.VERCEL !== '1') {
+  void startServer();
+}
