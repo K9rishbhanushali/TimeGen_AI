@@ -41,7 +41,14 @@ import { ConfirmModal } from '../components/ConfirmModal';
 
 type ViewMode = 'class' | 'teacher' | 'room' | 'lab';
 
-export const TimetablePage: React.FC = () => {
+interface TimetablePageProps {
+  /** Lock view for teacher/student roles (hides mode switcher) */
+  lockedViewMode?: ViewMode;
+  lockedId?: string;
+  readOnly?: boolean;
+}
+
+export const TimetablePage: React.FC<TimetablePageProps> = ({ lockedViewMode, lockedId, readOnly = false }) => {
   const [entries, setEntries] = useState<TimetableEntry[]>([]);
   const [classes, setClasses] = useState<StudentClass[]>([]);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
@@ -51,8 +58,8 @@ export const TimetablePage: React.FC = () => {
   const [slots, setSlots] = useState<TimeSlot[]>([]);
   const [config, setConfig] = useState<TimingConfig | null>(null);
 
-  const [viewMode, setViewMode] = useState<ViewMode>('class');
-  const [selectedId, setSelectedId] = useState<string>('');
+  const [viewMode, setViewMode] = useState<ViewMode>(lockedViewMode || 'class');
+  const [selectedId, setSelectedId] = useState<string>(lockedId || '');
 
   const [loading, setLoading] = useState(true);
   const [validationReport, setValidationReport] = useState<ValidationReport | null>(null);
@@ -91,7 +98,11 @@ export const TimetablePage: React.FC = () => {
       setSlots(slotData);
       setConfig(cfgData);
 
-      if (cData.length > 0 && !selectedId) setSelectedId(cData[0].id);
+      if (lockedId) {
+        setSelectedId(lockedId);
+      } else if (cData.length > 0 && !selectedId) {
+        setSelectedId(cData[0].id);
+      }
 
       // Run live validation
       const report = await timetableService.validate(eData);
@@ -212,6 +223,7 @@ export const TimetablePage: React.FC = () => {
 
       {/* Filter Controls Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl print:hidden">
+        {!lockedViewMode ? (
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
             {[
@@ -272,6 +284,14 @@ export const TimetablePage: React.FC = () => {
             </select>
           </div>
         </div>
+        ) : (
+          <div className="text-xs text-slate-300 font-semibold">
+            {lockedViewMode === 'teacher'
+              ? `My schedule — ${teachers.find(t => t.id === selectedId)?.name || 'Faculty'}`
+              : `Class schedule — ${classes.find(c => c.id === selectedId)?.name || 'My class'}`}
+            <span className="ml-2 text-[10px] text-slate-500 font-normal">read-only</span>
+          </div>
+        )}
 
         {/* Validation Status Indicator */}
         {validationReport && (
@@ -371,6 +391,9 @@ export const TimetablePage: React.FC = () => {
                         const rowSpan = slotEntries.length > 0
                           ? Math.max(...slotEntries.map(e => e.durationPeriods ?? ((e.sessionType === 'PRACTICAL' || e.resourceType === 'lab') ? 2 : 1)))
                           : 1;
+                        const isParallelBatchSlot = slotEntries.length > 1 && slotEntries.every(entry =>
+                          (entry.sessionType === 'PRACTICAL' || entry.resourceType === 'lab') && Boolean(entry.batchId)
+                        );
 
                         // The period is already occupied by the cell above. Returning no
                         // cell allows the 2-hour lab cell to span and centre across both rows.
@@ -383,7 +406,12 @@ export const TimetablePage: React.FC = () => {
                                 Free Slot
                               </div>
                             ) : (
-                              <div className="space-y-1.5 h-full flex flex-col justify-center">
+                              <div className={`${isParallelBatchSlot ? 'grid grid-cols-1 gap-2 lg:grid-cols-2' : 'space-y-1.5'} h-full ${isParallelBatchSlot ? '' : 'flex flex-col justify-center'}`}>
+                                {isParallelBatchSlot && (
+                                  <div className="lg:col-span-2 flex items-center gap-1.5 px-1 text-[10px] font-semibold uppercase tracking-wider text-indigo-300">
+                                    <FlaskConical className="h-3 w-3" /> Parallel practicals
+                                  </div>
+                                )}
                                 {slotEntries.map(entry => {
                                   const classObj = classes.find(c => c.id === entry.classId);
                                   const subjObj = subjects.find(s => s.id === entry.subjectId);
@@ -420,6 +448,7 @@ export const TimetablePage: React.FC = () => {
                                           {subjObj?.name || 'Subject'}
                                         </span>
 
+                                        {!readOnly && (
                                         <div className="flex items-center space-x-1 shrink-0">
                                           <button
                                             onClick={() => handleToggleLock(entry)}
@@ -447,7 +476,21 @@ export const TimetablePage: React.FC = () => {
                                             <Trash2 className="w-3 h-3" />
                                           </button>
                                         </div>
+                                        )}
                                       </div>
+
+                                      {/* Leave / cover status ribbon */}
+                                      {(entry.status === 'OPEN' || entry.status === 'COVERED') && (
+                                        <div className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-bold mb-1 ${
+                                          entry.status === 'OPEN'
+                                            ? 'bg-amber-500/20 border-amber-400/50 text-amber-200'
+                                            : 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                                        }`}>
+                                          {entry.status === 'OPEN'
+                                            ? 'OPEN — teacher absent, needs cover'
+                                            : `Cover: ${teachers.find(t => t.id === entry.coverTeacherId)?.name || 'assigned'}`}
+                                        </div>
+                                      )}
 
                                       {/* 2-Hour Lab Block Tag */}
                                       {isPractical && (

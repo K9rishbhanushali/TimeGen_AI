@@ -101,6 +101,8 @@ interface ActivityToSchedule {
   requiredHours: number;
   durationPeriods: number;
   labId?: string;
+  /** Batches with the same key represent the same practical block and should run together. */
+  parallelGroupKey?: string;
 }
 
 export function solveTimetable(
@@ -124,7 +126,6 @@ export function solveTimetable(
   // Helper maps
   const classroomMap = new Map(classrooms.map(c => [c.id, c]));
   const labMap = new Map(labs.map(l => [l.id, l]));
-  const classMap = new Map(classes.map(c => [c.id, c]));
   const teacherMap = new Map(teachers.map(t => [t.id, t]));
 
   // Ensure all classes have calculated batches
@@ -137,6 +138,7 @@ export function solveTimetable(
     }
     return c;
   });
+  const classMap = new Map(activeClasses.map(c => [c.id, c]));
 
   // Build activity list from ClassSubjects
   const activities: ActivityToSchedule[] = [];
@@ -171,18 +173,23 @@ export function solveTimetable(
       const practicalSessions = Math.ceil(practicalHours / 2);
       if (cs.requiresBatches && targetClass.batches && targetClass.batches.length > 0) {
         // Schedule for each batch
-        for (const b of targetClass.batches) {
+        for (const [batchIndex, b] of targetClass.batches.entries()) {
           for (let h = 0; h < practicalSessions; h++) {
             activities.push({
               id: `practical_${cs.id}_${b.id}_${h}`,
               classId: cs.classId,
               subjectId: cs.subjectId,
-              teacherId: cs.batchTeacherIds?.[b.id] || cs.teacherIds?.[targetClass.batches.indexOf(b) % cs.teacherIds.length] || cs.teacherId,
+              teacherId: cs.batchTeacherIds?.[b.id] || cs.teacherIds?.[batchIndex % cs.teacherIds.length] || cs.teacherId,
               batchId: b.id,
               type: 'PRACTICAL',
               requiredHours: 2,
               durationPeriods: 2,
-              labId: cs.batchLabIds?.[b.id] || cs.labId,
+              // The first batch uses the assignment's preferred lab. Later
+              // batches may use any compatible free lab unless the timetable
+              // administrator selected a specific batch lab. This makes
+              // parallel allocations (e.g. Java Lab + HTML Lab) possible.
+              labId: cs.batchLabIds?.[b.id] || (batchIndex === 0 ? cs.labId : undefined),
+              parallelGroupKey: `parallel_${cs.id}_${h}`,
             });
           }
         }
@@ -259,6 +266,10 @@ export function solveTimetable(
 
   let successCount = 0;
   const warnings: string[] = [];
+  // This is intentionally local to a generation run. It lets the second batch
+  // use the first batch's slot while normal resource checks still prevent an
+  // unsafe pairing (same teacher, lab, or batch).
+  const parallelGroupSlots = new Map<string, { day: string; periodIndex: number }>();
 
   // Place the longest, most constrained work first so it cannot be squeezed
   // out by short theory sessions. A stable secondary order keeps generations
@@ -275,28 +286,49 @@ export function solveTimetable(
     let assigned = false;
 
     // Find candidate slots
-    // Balance each class across the week first, then prefer a neighbouring
-    // period on that day to avoid gaps. The old order only preferred early
-    // periods, which caused repeated subjects and crowded days.
+    // Keep every class in compact, linear teaching runs. The only intentional
+    // gap is a configured break: it is excluded from the period sequence below.
+    // This prevents a timetable such as P1, P3, P6 for the same class when a
+    // continuous P1, P2, P3 run is possible.
     const candidateSlots = [...nonBreakSlots].sort((a, b) => {
+      const preferredSlot = parallelGroupSlots.get(activity.parallelGroupKey || '');
+      if (preferredSlot) {
+        const aIsParallel = a.day === preferredSlot.day && a.periodIndex === preferredSlot.periodIndex;
+        const bIsParallel = b.day === preferredSlot.day && b.periodIndex === preferredSlot.periodIndex;
+        if (aIsParallel !== bIsParallel) return aIsParallel ? -1 : 1;
+      }
       const dayMetrics = (slot: TimeSlot) => {
         const classEntries = scheduledEntries.filter(entry => entry.classId === activity.classId && entry.day === slot.day);
         const classHours = classEntries.reduce((total, entry) => total + (entry.durationPeriods || 1), 0);
         const sameSubjectToday = classEntries.some(entry =>
           entry.subjectId === activity.subjectId && entry.batchId === activity.batchId
         ) ? 1 : 0;
-        const nearestDistance = classEntries.length === 0
+        const daySlots = nonBreakSlots.filter(candidate => candidate.day === slot.day);
+        const periodOrder = new Map(daySlots.map((candidate, index) => [candidate.periodIndex, index]));
+        const occupied = new Set<number>();
+        for (const entry of classEntries) {
+          for (let index = 0; index < (entry.durationPeriods || 1); index++) {
+            const order = periodOrder.get(entry.periodIndex + index);
+            if (order !== undefined) occupied.add(order);
+          }
+        }
+        for (let index = 0; index < activity.durationPeriods; index++) {
+          const order = periodOrder.get(slot.periodIndex + index);
+          if (order !== undefined) occupied.add(order);
+        }
+        const occupiedOrders = [...occupied];
+        const gaps = occupiedOrders.length < 2
           ? 0
-          : Math.min(...classEntries.map(entry => Math.abs(slot.periodIndex - entry.periodIndex)));
+          : Math.max(...occupiedOrders) - Math.min(...occupiedOrders) + 1 - occupiedOrders.length;
         const teacherHours = scheduledHoursForTeacherOnDay(activity.teacherId, slot.day);
-        return { classHours, sameSubjectToday, nearestDistance, teacherHours };
+        return { classHours, sameSubjectToday, gaps, teacherHours };
       };
       const aMetrics = dayMetrics(a);
       const bMetrics = dayMetrics(b);
-      if (aMetrics.classHours !== bMetrics.classHours) return aMetrics.classHours - bMetrics.classHours;
-      if (aMetrics.sameSubjectToday !== bMetrics.sameSubjectToday) return aMetrics.sameSubjectToday - bMetrics.sameSubjectToday;
+      if (aMetrics.gaps !== bMetrics.gaps) return aMetrics.gaps - bMetrics.gaps;
+      if (aMetrics.classHours !== bMetrics.classHours) return bMetrics.classHours - aMetrics.classHours;
       if (aMetrics.teacherHours !== bMetrics.teacherHours) return aMetrics.teacherHours - bMetrics.teacherHours;
-      if (aMetrics.nearestDistance !== bMetrics.nearestDistance) return aMetrics.nearestDistance - bMetrics.nearestDistance;
+      if (aMetrics.sameSubjectToday !== bMetrics.sameSubjectToday) return aMetrics.sameSubjectToday - bMetrics.sameSubjectToday;
       return a.periodIndex - b.periodIndex;
     });
 
@@ -378,6 +410,9 @@ export function solveTimetable(
               sessionType: 'PRACTICAL',
               isLocked: false,
             });
+            if (activity.parallelGroupKey && !parallelGroupSlots.has(activity.parallelGroupKey)) {
+              parallelGroupSlots.set(activity.parallelGroupKey, { day: slot.day, periodIndex: slot.periodIndex });
+            }
             assigned = true;
             successCount++;
             break;

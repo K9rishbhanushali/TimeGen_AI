@@ -14,7 +14,11 @@ import {
   ValidationReport,
   DashboardStats,
   AIChatMessage,
-  ConflictInfo
+  ConflictInfo,
+  AppUser,
+  AuthResponse,
+  UserRole,
+  CoverNotice
 } from '../types';
 
 const BASE_URL = '/api';
@@ -133,6 +137,31 @@ export const timetableService = {
   getRuns: () => request<GenerationRun[]>('/timetable/runs'),
 };
 
+// Leave & Cover API (teachers release lectures, free teachers claim them)
+export interface ClaimConflict {
+  entryId: string;
+  subjectName: string;
+  className: string;
+  day: string;
+  periodIndex: number;
+  startTime: string;
+  endTime: string;
+}
+
+export const coverService = {
+  release: (id: string, teacherId: string) =>
+    request<TimetableEntry>(`/timetable/${id}/release`, { method: 'POST', body: JSON.stringify({ teacherId }) }),
+  cancelRelease: (id: string, teacherId: string) =>
+    request<TimetableEntry>(`/timetable/${id}/cancel-release`, { method: 'POST', body: JSON.stringify({ teacherId }) }),
+  claim: (id: string, payload: { teacherId: string; force?: boolean; releaseOwnEntryId?: string }) =>
+    request<TimetableEntry>(`/timetable/${id}/claim`, { method: 'POST', body: JSON.stringify(payload) }),
+  unclaim: (id: string, teacherId: string) =>
+    request<TimetableEntry>(`/timetable/${id}/unclaim`, { method: 'POST', body: JSON.stringify({ teacherId }) }),
+  markLeave: (teacherId: string, day: string) =>
+    request<{ success: boolean; released: number }>('/timetable/leave', { method: 'POST', body: JSON.stringify({ teacherId, day }) }),
+  getNotices: () => request<{ notices: CoverNotice[] }>('/notices'),
+};
+
 // Dashboard Stats API
 export const dashboardService = {
   getStats: () => request<DashboardStats>('/dashboard/stats'),
@@ -144,6 +173,44 @@ export const dashboardService = {
 export const databaseService = {
   seed: () => request<{ success: boolean; message: string }>('/seed', { method: 'POST' }),
   clearAll: () => request<{ success: boolean; message: string }>('/clear', { method: 'POST' }),
+};
+
+// Auth API (admin / teacher / student — only admin-created accounts can login)
+const AUTH_KEY = 'timegen_auth_user';
+const TOKEN_KEY = 'timegen_auth_token';
+
+export const authService = {
+  login: (email: string, password: string, role: UserRole) =>
+    request<AuthResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, role }),
+    }),
+  logout: () => {
+    localStorage.removeItem(AUTH_KEY);
+    localStorage.removeItem(TOKEN_KEY);
+  },
+  saveSession: (res: AuthResponse) => {
+    localStorage.setItem(AUTH_KEY, JSON.stringify(res.user));
+    localStorage.setItem(TOKEN_KEY, res.token);
+  },
+  currentUser: (): AppUser | null => {
+    try {
+      const raw = localStorage.getItem(AUTH_KEY);
+      return raw ? (JSON.parse(raw) as AppUser) : null;
+    } catch {
+      return null;
+    }
+  },
+};
+
+// User management API (admin creates teacher + student logins)
+export const userService = {
+  getAll: () => request<AppUser[]>('/users'),
+  create: (data: Partial<AppUser> & { password: string }) =>
+    request<AppUser>('/users', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<AppUser> & { password?: string }) =>
+    request<AppUser>(`/users/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) => request<{ success: boolean }>(`/users/${id}`, { method: 'DELETE' }),
 };
 
 // AI Assistant API

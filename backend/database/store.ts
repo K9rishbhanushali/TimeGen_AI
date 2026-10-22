@@ -12,7 +12,8 @@ import {
   TimingConfig,
   AvailabilityRule,
   TimetableEntry,
-  GenerationRun
+  GenerationRun,
+  AppUser
 } from '../../src/types';
 
 const MONGODB_URI = process.env.MONGODB_URI || '';
@@ -39,6 +40,7 @@ interface LocalDBData {
   availabilityRules: AvailabilityRule[];
   timetableEntries: TimetableEntry[];
   generationRuns: GenerationRun[];
+  users: AppUser[];
 }
 
 const defaultTimingConfig: TimingConfig = {
@@ -56,15 +58,7 @@ const defaultTimingConfig: TimingConfig = {
 };
 
 function loadLocalDB(): LocalDBData {
-  if (fs.existsSync(STORAGE_FILE)) {
-    try {
-      const data = fs.readFileSync(STORAGE_FILE, 'utf-8');
-      return JSON.parse(data);
-    } catch {
-      console.error('Error reading local JSON database, re-initializing.');
-    }
-  }
-  return {
+  const empty: LocalDBData = {
     classrooms: [],
     labs: [],
     classes: [],
@@ -75,7 +69,18 @@ function loadLocalDB(): LocalDBData {
     availabilityRules: [],
     timetableEntries: [],
     generationRuns: [],
+    users: [],
   };
+  if (fs.existsSync(STORAGE_FILE)) {
+    try {
+      const data = fs.readFileSync(STORAGE_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      return { ...empty, ...parsed, users: Array.isArray(parsed.users) ? parsed.users : [] };
+    } catch {
+      console.error('Error reading local JSON database, re-initializing.');
+    }
+  }
+  return empty;
 }
 
 function saveLocalDB(data: LocalDBData) {
@@ -419,6 +424,37 @@ export const db = {
     return run;
   },
 
+  // Users (auth: admin / teacher / student)
+  getUsers: async (): Promise<AppUser[]> => {
+    if (dbInstance) {
+      const docs = await dbInstance.collection<AppUser>('users').find().toArray();
+      return docs.map(d => ({ ...d, id: d.id || (d as unknown as { _id: string })._id?.toString() }));
+    }
+    return loadLocalDB().users || [];
+  },
+  saveUser: async (item: AppUser): Promise<AppUser> => {
+    if (dbInstance) {
+      await dbInstance.collection('users').updateOne({ id: item.id }, { $set: item }, { upsert: true });
+      return item;
+    }
+    const local = loadLocalDB();
+    const idx = local.users.findIndex(u => u.id === item.id);
+    if (idx >= 0) local.users[idx] = item;
+    else local.users.push(item);
+    saveLocalDB(local);
+    return item;
+  },
+  deleteUser: async (id: string): Promise<boolean> => {
+    if (dbInstance) {
+      const res = await dbInstance.collection('users').deleteOne({ id });
+      return res.deletedCount > 0;
+    }
+    const local = loadLocalDB();
+    local.users = local.users.filter(u => u.id !== id);
+    saveLocalDB(local);
+    return true;
+  },
+
   // Reset / Clear
   clearAll: async (): Promise<boolean> => {
     if (dbInstance) {
@@ -435,6 +471,8 @@ export const db = {
       ]);
       return true;
     }
+    // Preserve login users (admin / teacher / student) on reset.
+    const existing = loadLocalDB();
     saveLocalDB({
       classrooms: [],
       labs: [],
@@ -446,6 +484,7 @@ export const db = {
       availabilityRules: [],
       timetableEntries: [],
       generationRuns: [],
+      users: existing.users || [],
     });
     return true;
   },

@@ -192,6 +192,10 @@ export const ClassesPage: React.FC = () => {
   const handleAssignmentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeClassForSubjects) return;
+    if (assignFormData.weeklyPracticalHours < 0 || assignFormData.weeklyPracticalHours % 2 !== 0) {
+      alert('Practical hours must be 0 or a multiple of 2 (2, 4, 6, ...) — one lab session occupies two periods.');
+      return;
+    }
 
     try {
       const payload = {
@@ -724,6 +728,7 @@ export const ClassesPage: React.FC = () => {
                     type="number"
                     required
                     min={0}
+                    step={2}
                     value={assignFormData.weeklyPracticalHours}
                     onChange={e => setAssignFormData({ ...assignFormData, weeklyPracticalHours: parseInt(e.target.value, 10) || 0 })}
                     className="w-full bg-slate-950 text-white p-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500"

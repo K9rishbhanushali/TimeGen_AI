@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, Edit2, Trash2, Users, Search, Mail, Phone, Clock, Briefcase } from 'lucide-react';
-import { Teacher } from '../types';
-import { teacherService } from '../services/api';
+import { Plus, Edit2, Trash2, Users, Search, Mail, Phone, Clock, Briefcase, KeyRound } from 'lucide-react';
+import { AppUser, Teacher } from '../types';
+import { teacherService, userService } from '../services/api';
 import { ConfirmModal } from '../components/ConfirmModal';
 
 export const TeachersPage: React.FC = () => {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [users, setUsers] = useState<AppUser[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -19,19 +20,25 @@ export const TeachersPage: React.FC = () => {
     email: '',
     phone: '',
     maxHoursPerDay: 6,
+    loginPassword: '',
   });
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const data = await teacherService.getAll();
-      setTeachers(data);
+      const [tData, uData] = await Promise.all([teacherService.getAll(), userService.getAll()]);
+      setTeachers(tData);
+      setUsers(uData);
     } catch (err) {
       console.error('Failed to load teachers:', err);
     } finally {
       setLoading(false);
     }
   };
+
+  // Same entity: find the login belonging to a faculty profile
+  const findLogin = (t: Teacher): AppUser | undefined =>
+    users.find(u => u.role === 'teacher' && (u.teacherId === t.id || u.email.toLowerCase() === (t.email || '').toLowerCase()));
 
   useEffect(() => {
     loadData();
@@ -46,6 +53,7 @@ export const TeachersPage: React.FC = () => {
       email: `faculty${teachers.length + 1}@college.edu`,
       phone: '+91 9876543210',
       maxHoursPerDay: 6,
+      loginPassword: '',
     });
     setIsModalOpen(true);
   };
@@ -59,8 +67,28 @@ export const TeachersPage: React.FC = () => {
       email: item.email,
       phone: item.phone,
       maxHoursPerDay: item.maxHoursPerDay,
+      loginPassword: '',
     });
     setIsModalOpen(true);
+  };
+
+  const handleCreateLogin = async (item: Teacher) => {
+    const pw = window.prompt(`Create login for ${item.name} (${item.email}). Enter password:`, 'pass1234');
+    if (!pw) return;
+    try {
+      await userService.create({
+        name: item.name,
+        email: item.email,
+        password: pw,
+        role: 'teacher',
+        teacherId: item.id,
+        employeeId: item.employeeId,
+        department: item.department,
+      });
+      await loadData();
+    } catch (err) {
+      alert((err as Error).message);
+    }
   };
 
   const handleDeleteClick = (id: string) => {
@@ -81,10 +109,29 @@ export const TeachersPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const { loginPassword, ...profileData } = formData;
+      let teacherId = editingItem?.id;
       if (editingItem) {
-        await teacherService.update(editingItem.id, formData);
+        await teacherService.update(editingItem.id, profileData);
       } else {
-        await teacherService.create(formData);
+        const created = await teacherService.create(profileData);
+        teacherId = created.id;
+      }
+      // Optional: create the login for the same teacher right away
+      if (loginPassword.trim() && teacherId && !findLogin({ ...profileData, id: teacherId } as Teacher)) {
+        try {
+          await userService.create({
+            name: profileData.name,
+            email: profileData.email,
+            password: loginPassword.trim(),
+            role: 'teacher',
+            teacherId,
+            employeeId: profileData.employeeId,
+            department: profileData.department,
+          });
+        } catch (loginErr) {
+          alert(`Teacher saved, but login creation failed: ${(loginErr as Error).message}`);
+        }
       }
       setIsModalOpen(false);
       await loadData();
@@ -154,11 +201,14 @@ export const TeachersPage: React.FC = () => {
                   <th className="p-4">Department</th>
                   <th className="p-4">Contact Info</th>
                   <th className="p-4">Max Workload / Day</th>
+                  <th className="p-4">Login</th>
                   <th className="p-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {filtered.map(item => (
+                {filtered.map(item => {
+                  const login = findLogin(item);
+                  return (
                   <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
                     <td className="p-4 font-semibold text-white">
                       <div className="flex items-center space-x-2.5">
@@ -193,6 +243,23 @@ export const TeachersPage: React.FC = () => {
                         Max {item.maxHoursPerDay} hrs/day
                       </span>
                     </td>
+                    <td className="p-4">
+                      {login ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-950/50 text-emerald-300 border border-emerald-800/50">
+                          <KeyRound className="w-3 h-3 text-emerald-400" />
+                          Login: {login.email}
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleCreateLogin(item)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:border-indigo-500 hover:text-white transition-all cursor-pointer"
+                          title="Create a login for this same teacher"
+                        >
+                          <KeyRound className="w-3 h-3" />
+                          No login — create one
+                        </button>
+                      )}
+                    </td>
                     <td className="p-4 text-right space-x-2">
                       <button
                         onClick={() => handleOpenEdit(item)}
@@ -208,7 +275,8 @@ export const TeachersPage: React.FC = () => {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -301,6 +369,22 @@ export const TeachersPage: React.FC = () => {
                 </div>
               </div>
 
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">Login Password (optional)</label>
+                <input
+                  type="text"
+                  value={formData.loginPassword}
+                  onChange={e => setFormData({ ...formData, loginPassword: e.target.value })}
+                  placeholder="Leave empty for no login — e.g. pass1234"
+                  className="w-full bg-slate-950 text-white p-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-amber-500"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  {editingItem && findLogin(editingItem)
+                    ? 'This teacher already has a login linked to the same profile.'
+                    : 'If filled, a login is created for this same teacher using the email above.'}
+                </p>
+              </div>
+
               <div className="flex items-center justify-end space-x-3 pt-4 border-t border-slate-800">
                 <button
                   type="button"
@@ -325,7 +409,7 @@ export const TeachersPage: React.FC = () => {
       <ConfirmModal
         isOpen={!!deletingId}
         title="Delete Teacher Record"
-        message="Are you sure you want to delete this faculty member? Class assignments and sessions assigned to this teacher will be affected."
+        message="Are you sure you want to delete this faculty member? Class assignments and sessions assigned to this teacher will be affected. Their login (if any) is kept but unlinked from this profile."
         confirmText="Delete Teacher"
         onConfirm={handleConfirmDelete}
         onCancel={() => setDeletingId(null)}

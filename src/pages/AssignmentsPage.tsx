@@ -115,6 +115,10 @@ export const AssignmentsPage: React.FC = () => {
       alert('Select at least one teacher for this subject.');
       return;
     }
+    if (formData.weeklyPracticalHours < 0 || formData.weeklyPracticalHours % 2 !== 0) {
+      alert('Practical hours must be 0 or a multiple of 2 (2, 4, 6, ...) — one lab session occupies two periods.');
+      return;
+    }
     try {
       if (editingItem) {
         await assignmentService.update(editingItem.id, formData);
@@ -268,7 +272,7 @@ export const AssignmentsPage: React.FC = () => {
       {/* Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-2xl rounded-2xl p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95">
             <h2 className="text-base font-bold text-white">
               {editingItem ? 'Edit Class Assignment' : 'Assign Subject to Class'}
             </h2>
@@ -341,6 +345,7 @@ export const AssignmentsPage: React.FC = () => {
                     type="number"
                     required
                     min={0}
+                    step={2}
                     value={formData.weeklyPracticalHours}
                     onChange={e => setFormData({ ...formData, weeklyPracticalHours: parseInt(e.target.value, 10) || 0 })}
                     className="w-full bg-slate-950 text-white p-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500"
@@ -381,16 +386,26 @@ export const AssignmentsPage: React.FC = () => {
               </div>
 
               {formData.weeklyPracticalHours > 0 && formData.requiresBatches && (selectedClass?.batches?.length || 0) > 0 && (
-                <div className="space-y-2 rounded-xl border border-violet-500/30 bg-violet-500/5 p-3">
-                  <p className="text-xs font-semibold text-violet-200">Batch practical setup</p>
-                  <p className="text-[10px] text-slate-400">Assign different teachers and labs to run batches simultaneously. A teacher cannot supervise two batches at the same time.</p>
+                <div className="space-y-3 rounded-2xl border border-indigo-400/25 bg-gradient-to-br from-indigo-500/10 via-violet-500/5 to-transparent p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-semibold text-white">Parallel batch practicals</p>
+                      <p className="mt-1 text-[11px] text-slate-400">Batch A and Batch B are scheduled in the same 2-period slot whenever separate faculty and labs are available.</p>
+                    </div>
+                    <span className="shrink-0 rounded-full border border-indigo-400/30 bg-indigo-400/10 px-2.5 py-1 text-[10px] font-bold tracking-wide text-indigo-200">
+                      {selectedClass!.batches!.length} BATCHES
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-[minmax(86px,.6fr)_minmax(0,1fr)_minmax(0,1fr)] gap-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    <span>Batch</span><span>Faculty</span><span>Laboratory</span>
+                  </div>
                   {selectedClass!.batches!.map(batch => (
-                    <div key={batch.id} className="grid grid-cols-[auto_1fr_1fr] items-center gap-2">
-                      <span className="text-[10px] font-semibold text-slate-300">{batch.name}</span>
-                      <select value={formData.batchTeacherIds[batch.id] || formData.teacherId} onChange={e => updateBatchOverride(batch.id, 'batchTeacherIds', e.target.value)} className="min-w-0 bg-slate-950 text-white p-2 rounded-lg border border-slate-800">
+                    <div key={batch.id} className="grid grid-cols-[minmax(86px,.6fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-2 rounded-xl border border-slate-700/70 bg-slate-950/70 p-2">
+                      <span className="min-w-0 text-[11px] font-semibold text-white"><span className="block truncate">{batch.name}</span><span className="text-[10px] font-normal text-slate-500">{batch.studentCount} students</span></span>
+                      <select aria-label={`${batch.name} faculty`} value={formData.batchTeacherIds[batch.id] || formData.teacherId} onChange={e => updateBatchOverride(batch.id, 'batchTeacherIds', e.target.value)} className="min-w-0 bg-slate-900 text-white p-2 rounded-lg border border-slate-700 focus:outline-none focus:border-indigo-400">
                         {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                       </select>
-                      <select value={formData.batchLabIds[batch.id] || formData.labId} onChange={e => updateBatchOverride(batch.id, 'batchLabIds', e.target.value)} className="min-w-0 bg-slate-950 text-white p-2 rounded-lg border border-slate-800">
+                      <select aria-label={`${batch.name} laboratory`} value={formData.batchLabIds[batch.id] || formData.labId} onChange={e => updateBatchOverride(batch.id, 'batchLabIds', e.target.value)} className="min-w-0 bg-slate-900 text-white p-2 rounded-lg border border-slate-700 focus:outline-none focus:border-indigo-400">
                         <option value="">Auto-select lab</option>
                         {labs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
                       </select>

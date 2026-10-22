@@ -38,12 +38,12 @@ export const GeneratePage: React.FC<GeneratePageProps> = ({ onNavigate }) => {
 
       const p2 = setTimeout(() => {
         setProgress(65);
-        setStage('Executing heuristic CP-SAT backtracking search & batch allocations...');
+        setStage('Building compact class runs and parallel batch lab allocations...');
       }, 700);
 
       const p3 = setTimeout(() => {
         setProgress(85);
-        setStage('Evaluating soft constraint penalty scores & gap optimization...');
+        setStage('Checking conflicts, capacity, and timetable continuity...');
       }, 1000);
 
       const genResult = await timetableService.generate({ startFresh });
@@ -77,7 +77,7 @@ export const GeneratePage: React.FC<GeneratePageProps> = ({ onNavigate }) => {
           <span>Generate College Timetable</span>
         </h1>
         <p className="text-xs text-slate-400">
-          Run the automatic constraint solver to create an optimized, conflict-free schedule across all classes, labs, and teachers.
+          Generate conflict-free, continuous class schedules. Lunch is the only planned gap, while compatible Batch A/B practicals run together in different labs.
         </p>
       </div>
 
@@ -118,7 +118,7 @@ export const GeneratePage: React.FC<GeneratePageProps> = ({ onNavigate }) => {
               </div>
               <p className="text-[10px] text-slate-500">
                 {startFresh
-                  ? 'Overwrites all unlocked entries with a newly generated schedule.'
+                  ? 'Creates a completely new compact timetable from the available periods.'
                   : 'Keeps user-locked entries fixed and fills remaining slots.'}
               </p>
             </div>
@@ -155,8 +155,8 @@ export const GeneratePage: React.FC<GeneratePageProps> = ({ onNavigate }) => {
                 Soft Constraints (Optimization heuristics)
               </span>
               {[
-                { key: 'softMinimizeGaps', label: 'Minimize Empty Periods in Student Timetable' },
-                { key: 'softSpreadPracticals', label: 'Spread Lab Practicals Evenly across Days' },
+                { key: 'softMinimizeGaps', label: 'Keep each class in a continuous period sequence' },
+                { key: 'softSpreadPracticals', label: 'Run compatible Batch A / B practicals in parallel' },
               ].map(item => (
                 <label key={item.key} className="flex items-center space-x-2 text-slate-300 cursor-pointer">
                   <input

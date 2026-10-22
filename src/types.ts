@@ -145,6 +145,8 @@ export interface AvailabilityRule {
   reason?: string;
 }
 
+export type LectureStatus = 'SCHEDULED' | 'OPEN' | 'COVERED';
+
 export interface TimetableEntry {
   id: string;
   day: string;
@@ -163,6 +165,31 @@ export interface TimetableEntry {
   sessionType?: 'THEORY' | 'PRACTICAL';
   isLocked: boolean;
   notes?: string;
+  /**
+   * Leave/cover workflow. Missing/undefined means SCHEDULED.
+   * OPEN = owner teacher released it (absent), any free teacher may claim.
+   * COVERED = claimed by coverTeacherId (subject need not match).
+   */
+  status?: LectureStatus;
+  coverTeacherId?: string | null;
+}
+
+export interface CoverNotice {
+  id: string;
+  day: string;
+  periodIndex: number;
+  startTime: string;
+  endTime: string;
+  classId: string;
+  className: string;
+  subjectId: string;
+  subjectName: string;
+  absentTeacherId: string;
+  absentTeacherName: string;
+  status: 'OPEN' | 'COVERED';
+  coverTeacherId?: string | null;
+  coverTeacherName?: string | null;
+  message: string;
 }
 
 export interface GenerationRun {
@@ -210,6 +237,30 @@ export interface AIChatMessage {
     type: 'MOVE_ENTRY' | 'LOCK_ENTRY' | 'GENERATE_TIMETABLE';
     payload: Record<string, unknown>;
   };
+}
+
+export type UserRole = 'admin' | 'teacher' | 'student';
+
+export interface AppUser {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  password?: string;
+  /** Link to Teacher profile id (for role=teacher) */
+  teacherId?: string | null;
+  /** Link to StudentClass id (for role=student) */
+  classId?: string | null;
+  employeeId?: string;
+  rollNo?: string;
+  department?: string;
+  phone?: string;
+  createdAt?: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: AppUser;
 }
 
 export interface DashboardStats {

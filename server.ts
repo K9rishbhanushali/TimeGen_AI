@@ -1,12 +1,47 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { initDatabase, db, isMongoDBConnected } from './backend/database/store';
 import { solveTimetable, generateTimeSlots, generateBatchesForClass } from './backend/scheduler/solver';
 import { validateTimetable } from './backend/scheduler/validator';
 import { seedDatabase } from './backend/seed/demoData';
 import { processAIChat, explainConflictAI } from './backend/ai/assistant';
-import { Classroom, Lab, StudentClass, Teacher, Subject, ClassSubject, AvailabilityRule, TimetableEntry } from './src/types';
+import { Classroom, Lab, StudentClass, Teacher, Subject, ClassSubject, AvailabilityRule, TimetableEntry, AppUser, UserRole } from './src/types';
+
+// ---- Simple auth helpers (no extra deps) ----
+function hashPassword(password: string): string {
+  return crypto.createHash('sha256').update(String(password)).digest('hex');
+}
+
+function sanitizeUser(u: AppUser): Omit<AppUser, 'password'> {
+  const { password: _pw, ...rest } = u;
+  return rest;
+}
+
+function makeToken(user: AppUser): string {
+  return Buffer.from(`${user.id}:${user.role}:${Date.now()}`).toString('base64');
+}
+
+const DEFAULT_ADMIN_EMAIL = (process.env.DEFAULT_ADMIN_EMAIL || 'admin@timegen.ai').toLowerCase();
+const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || 'admin123';
+
+async function ensureDefaultAdmin() {
+  const users = await db.getUsers();
+  const hasAdmin = users.some(u => u.role === 'admin');
+  if (!hasAdmin) {
+    const admin: AppUser = {
+      id: `user_admin_${Date.now()}`,
+      name: 'Administrator',
+      email: DEFAULT_ADMIN_EMAIL,
+      password: hashPassword(DEFAULT_ADMIN_PASSWORD),
+      role: 'admin',
+      createdAt: new Date().toISOString(),
+    };
+    await db.saveUser(admin);
+    console.log(`Seeded default admin login: ${DEFAULT_ADMIN_EMAIL} / ${DEFAULT_ADMIN_PASSWORD}`);
+  }
+}
 
 // Creates the shared Express application. It is used by the local Node server
 // and by Vercel's serverless API entrypoint.
@@ -25,6 +60,9 @@ export async function createApp() {
     await seedDatabase().catch(err => console.error('Initial seeding error:', err));
   }
 
+  // Always ensure at least one admin login exists.
+  await ensureDefaultAdmin().catch(err => console.error('Admin seed error:', err));
+
   // Health check
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', database: isMongoDBConnected() ? 'MongoDB Atlas' : 'Local JSON', time: new Date().toISOString() });
@@ -32,6 +70,201 @@ export async function createApp() {
 
   app.get('/api/db-status', (req, res) => {
     res.json({ isMongoDB: isMongoDBConnected() });
+  });
+
+  // --- AUTH (admin / teacher / student) ---
+  // Login: only users created by admin can login. Role tab must match account role.
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { email, password, role } = req.body || {};
+      if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+      const users = await db.getUsers();
+      const found = users.find(u => u.email.toLowerCase() === String(email).toLowerCase());
+      if (!found) return res.status(401).json({ error: 'Invalid email or password' });
+      if (found.password !== hashPassword(String(password))) {
+        return res.status(401).json({ error: 'Invalid email or password' });
+      }
+      if (role && found.role !== role) {
+        return res.status(403).json({ error: `This account is a "${found.role}" account. Please use the ${found.role} login tab.` });
+      }
+      res.json({ token: makeToken(found), user: sanitizeUser(found) });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // List users (passwords stripped). Used by admin panel.
+  app.get('/api/users', async (req, res) => {
+    const users = await db.getUsers();
+    res.json(users.map(sanitizeUser));
+  });
+
+  // Admin creates teacher / student logins (and also admin if needed).
+  // For role=teacher: auto-creates a Teacher profile when teacherId is not supplied,
+  // so the new teacher immediately appears in timetables/assignments.
+  app.post('/api/users', async (req, res) => {
+    try {
+      const { name, email, password, role, teacherId, classId, employeeId, rollNo, department, phone } = req.body || {};
+      if (!name || !email || !password || !role) {
+        return res.status(400).json({ error: 'name, email, password and role are required' });
+      }
+      const cleanRole = String(role) as UserRole;
+      if (!['admin', 'teacher', 'student'].includes(cleanRole)) {
+        return res.status(400).json({ error: 'role must be admin, teacher or student' });
+      }
+      const users = await db.getUsers();
+      if (users.some(u => u.email.toLowerCase() === String(email).toLowerCase())) {
+        return res.status(409).json({ error: 'This email is already registered' });
+      }
+
+      let linkedTeacherId: string | null = teacherId || null;
+      let linkedClassId: string | null = classId || null;
+
+      if (cleanRole === 'teacher') {
+        const teachers = await db.getTeachers();
+        const emailLower = String(email).toLowerCase();
+        if (linkedTeacherId) {
+          const profile = teachers.find(t => t.id === linkedTeacherId);
+          if (!profile) {
+            return res.status(400).json({ error: 'Linked teacher profile not found' });
+          }
+          // One faculty profile -> one login. Keep them the same entity.
+          const alreadyLinked = users.find(u => u.role === 'teacher' && u.teacherId === linkedTeacherId);
+          if (alreadyLinked) {
+            return res.status(409).json({ error: `This faculty profile already has a login (${alreadyLinked.email})` });
+          }
+          // Sync profile to the login details so both stay identical
+          await db.saveTeacher({
+            ...profile,
+            name: String(name),
+            email: emailLower,
+            employeeId: employeeId ? String(employeeId) : profile.employeeId,
+            department: department ? String(department) : profile.department,
+            phone: phone ? String(phone) : profile.phone,
+          });
+        } else {
+          // Reuse existing faculty profile with the same email instead of duplicating
+          const existingProfile = teachers.find(t => (t.email || '').toLowerCase() === emailLower);
+          if (existingProfile) {
+            const alreadyLinked = users.find(u => u.role === 'teacher' && u.teacherId === existingProfile.id);
+            if (alreadyLinked) {
+              return res.status(409).json({ error: `This teacher already has a login (${alreadyLinked.email})` });
+            }
+            await db.saveTeacher({
+              ...existingProfile,
+              name: String(name),
+              employeeId: employeeId ? String(employeeId) : existingProfile.employeeId,
+              department: department ? String(department) : existingProfile.department,
+              phone: phone ? String(phone) : existingProfile.phone,
+            });
+            linkedTeacherId = existingProfile.id;
+          } else {
+            // Auto-create faculty profile for timetable linkage
+            const newTeacher: Teacher = {
+              id: `t_${Date.now()}`,
+              name: String(name),
+              employeeId: String(employeeId || `EMP${100 + users.length + 1}`),
+              department: String(department || 'Information Technology'),
+              email: emailLower,
+              phone: String(phone || '+91 9876543210'),
+              maxHoursPerDay: 6,
+            };
+            await db.saveTeacher(newTeacher);
+            linkedTeacherId = newTeacher.id;
+          }
+        }
+      }
+
+      if (cleanRole === 'student') {
+        if (!linkedClassId) return res.status(400).json({ error: 'classId is required for student accounts' });
+        const classes = await db.getClasses();
+        if (!classes.some(c => c.id === linkedClassId)) {
+          return res.status(400).json({ error: 'Selected class not found' });
+        }
+      }
+
+      const item: AppUser = {
+        id: `user_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: String(name),
+        email: String(email).toLowerCase(),
+        password: hashPassword(String(password)),
+        role: cleanRole,
+        teacherId: linkedTeacherId,
+        classId: linkedClassId,
+        employeeId: employeeId ? String(employeeId) : undefined,
+        rollNo: rollNo ? String(rollNo) : undefined,
+        department: department ? String(department) : undefined,
+        createdAt: new Date().toISOString(),
+      };
+      await db.saveUser(item);
+      res.json(sanitizeUser(item));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.put('/api/users/:id', async (req, res) => {
+    try {
+      const users = await db.getUsers();
+      const existing = users.find(u => u.id === req.params.id);
+      if (!existing) return res.status(404).json({ error: 'User not found' });
+      const { name, email, password, teacherId, classId, employeeId, rollNo, department } = req.body || {};
+      if (email && users.some(u => u.id !== existing.id && u.email.toLowerCase() === String(email).toLowerCase())) {
+        return res.status(409).json({ error: 'This email is already registered' });
+      }
+      const updated: AppUser = {
+        ...existing,
+        name: name ?? existing.name,
+        email: email ? String(email).toLowerCase() : existing.email,
+        teacherId: teacherId !== undefined ? teacherId : existing.teacherId,
+        classId: classId !== undefined ? classId : existing.classId,
+        employeeId: employeeId !== undefined ? employeeId : existing.employeeId,
+        rollNo: rollNo !== undefined ? rollNo : existing.rollNo,
+        department: department !== undefined ? department : existing.department,
+      };
+      if (password) updated.password = hashPassword(String(password));
+      if (updated.teacherId && (teacherId !== undefined || name !== undefined || department !== undefined || employeeId !== undefined)) {
+        // A teacher login that points at a different profile — keep 1:1 mapping
+        if (teacherId !== undefined && teacherId !== existing.teacherId) {
+          const allUsers = await db.getUsers();
+          const clash = allUsers.find(u => u.id !== updated.id && u.role === 'teacher' && u.teacherId === teacherId);
+          if (clash) return res.status(409).json({ error: `This faculty profile already has a login (${clash.email})` });
+          const profiles = await db.getTeachers();
+          if (teacherId && !profiles.some(t => t.id === teacherId)) {
+            return res.status(400).json({ error: 'Linked teacher profile not found' });
+          }
+        }
+      }
+      await db.saveUser(updated);
+      // Keep the linked faculty profile identical to the login
+      if (updated.role === 'teacher' && updated.teacherId) {
+        const profiles = await db.getTeachers();
+        const profile = profiles.find(t => t.id === updated.teacherId);
+        if (profile) {
+          await db.saveTeacher({
+            ...profile,
+            name: updated.name,
+            employeeId: updated.employeeId || profile.employeeId,
+            department: updated.department || profile.department,
+          });
+        }
+      }
+      res.json(sanitizeUser(updated));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.delete('/api/users/:id', async (req, res) => {
+    const users = await db.getUsers();
+    const existing = users.find(u => u.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+    if (existing.role === 'admin' && users.filter(u => u.role === 'admin').length <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the last admin account' });
+    }
+    await db.deleteUser(req.params.id);
+    // NOTE: linked Teacher profile is kept so timetable history stays intact.
+    res.json({ success: true });
   });
 
   // --- CLASSROOMS ---
@@ -182,6 +415,20 @@ export async function createApp() {
       ...req.body,
     };
     await db.saveTeacher(item);
+    // Same entity both ways: if a teacher login with this email exists
+    // but has no linked profile yet, link it to the new profile.
+    try {
+      const emailLower = (item.email || '').toLowerCase();
+      if (emailLower) {
+        const users = await db.getUsers();
+        const match = users.find(u => u.role === 'teacher' && (u.email || '').toLowerCase() === emailLower && !u.teacherId);
+        if (match) {
+          await db.saveUser({ ...match, teacherId: item.id, name: match.name || item.name, department: match.department || item.department });
+        }
+      }
+    } catch (err) {
+      console.error('Teacher-login auto-link error:', err);
+    }
     res.json(item);
   });
 
@@ -191,11 +438,36 @@ export async function createApp() {
     if (!existing) return res.status(404).json({ error: 'Teacher not found' });
     const updated = { ...existing, ...req.body, id: req.params.id };
     await db.saveTeacher(updated);
+    // Keep linked teacher login identical to the faculty profile
+    try {
+      const users = await db.getUsers();
+      const linked = users.filter(u => u.role === 'teacher' && u.teacherId === req.params.id);
+      for (const u of linked) {
+        await db.saveUser({
+          ...u,
+          name: updated.name,
+          employeeId: updated.employeeId,
+          department: updated.department,
+        });
+      }
+    } catch (err) {
+      console.error('Teacher-login sync error:', err);
+    }
     res.json(updated);
   });
 
   app.delete('/api/teachers/:id', async (req, res) => {
     const success = await db.deleteTeacher(req.params.id);
+    // Unlink logins pointing at the removed profile so they don't dangle
+    try {
+      const users = await db.getUsers();
+      const linked = users.filter(u => u.teacherId === req.params.id);
+      for (const u of linked) {
+        await db.saveUser({ ...u, teacherId: null });
+      }
+    } catch (err) {
+      console.error('Teacher-login unlink error:', err);
+    }
     res.json({ success });
   });
 
@@ -313,20 +585,30 @@ export async function createApp() {
   };
 
   const handleCreateAssignment = async (req: express.Request, res: express.Response) => {
-    const item = normalizeAssignment(req.body);
-    await db.saveClassSubject(item);
-    const populated = await populateAssignment(item);
-    res.json(populated);
+    try {
+      const item = normalizeAssignment(req.body);
+      await db.saveClassSubject(item);
+      const populated = await populateAssignment(item);
+      res.json(populated);
+    } catch (err) {
+      // Validation errors (e.g. odd practical hours) must return 400, never crash the server
+      res.status(400).json({ error: (err as Error).message });
+    }
   };
 
   const handleUpdateAssignment = async (req: express.Request, res: express.Response) => {
-    const list = await db.getClassSubjects();
-    const existing = list.find(cs => cs.id === req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Assignment not found' });
-    const updated = normalizeAssignment({ ...existing, ...req.body }, req.params.id);
-    await db.saveClassSubject(updated);
-    const populated = await populateAssignment(updated);
-    res.json(populated);
+    try {
+      const list = await db.getClassSubjects();
+      const existing = list.find(cs => cs.id === req.params.id);
+      if (!existing) return res.status(404).json({ error: 'Assignment not found' });
+      const updated = normalizeAssignment({ ...existing, ...req.body }, req.params.id);
+      await db.saveClassSubject(updated);
+      const populated = await populateAssignment(updated);
+      res.json(populated);
+    } catch (err) {
+      // Validation errors (e.g. odd practical hours) must return 400, never crash the server
+      res.status(400).json({ error: (err as Error).message });
+    }
   };
 
   const handleDeleteAssignment = async (req: express.Request, res: express.Response) => {
@@ -492,6 +774,209 @@ export async function createApp() {
     const updated = await db.updateTimetableEntry(req.params.id, { isLocked });
     if (!updated) return res.status(404).json({ error: 'Timetable entry not found' });
     res.json(updated);
+  });
+
+  // --- LEAVE & COVER WORKFLOW ---
+  // A teacher releases their lecture (absent) -> status OPEN.
+  // Any other teacher free in that slot may claim it (subject need not match).
+  const entryStatus = (e: TimetableEntry): 'SCHEDULED' | 'OPEN' | 'COVERED' => e.status || 'SCHEDULED';
+
+  const teacherBusyAt = (entries: TimetableEntry[], teacherId: string, day: string, periodIndex: number, excludeId?: string) =>
+    entries.filter(e =>
+      e.id !== excludeId &&
+      e.day === day &&
+      e.periodIndex === periodIndex &&
+      ((e.teacherId === teacherId && entryStatus(e) !== 'OPEN') || e.coverTeacherId === teacherId)
+    );
+
+  // Release my lecture (mark absent) -> OPEN for others to take
+  app.post('/api/timetable/:id/release', async (req, res) => {
+    try {
+      const { teacherId } = req.body || {};
+      const entries = await db.getTimetableEntries();
+      const target = entries.find(e => e.id === req.params.id);
+      if (!target) return res.status(404).json({ error: 'Lecture not found' });
+      if (!teacherId || target.teacherId !== teacherId) {
+        return res.status(403).json({ error: 'Only the assigned teacher can release this lecture' });
+      }
+      target.status = 'OPEN';
+      target.coverTeacherId = null;
+      await db.saveTimetableEntries(entries);
+      res.json(target);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Undo my release -> back to SCHEDULED (only while nobody covers it)
+  app.post('/api/timetable/:id/cancel-release', async (req, res) => {
+    try {
+      const { teacherId } = req.body || {};
+      const entries = await db.getTimetableEntries();
+      const target = entries.find(e => e.id === req.params.id);
+      if (!target) return res.status(404).json({ error: 'Lecture not found' });
+      if (target.teacherId !== teacherId) {
+        return res.status(403).json({ error: 'Only the assigned teacher can undo this release' });
+      }
+      if (entryStatus(target) !== 'OPEN') {
+        return res.status(400).json({ error: 'This lecture is not released' });
+      }
+      target.status = 'SCHEDULED';
+      target.coverTeacherId = null;
+      await db.saveTimetableEntries(entries);
+      res.json(target);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Claim an OPEN lecture. Anyone free in that slot can take it.
+  // If the claimant has their own class at that time, the server refuses
+  // (409 + conflict details) unless force=true with releaseOwnEntryId —
+  // then the claimant's own lecture is freed for others (swap).
+  app.post('/api/timetable/:id/claim', async (req, res) => {
+    try {
+      const { teacherId, force, releaseOwnEntryId } = req.body || {};
+      if (!teacherId) return res.status(400).json({ error: 'teacherId is required' });
+      const entries = await db.getTimetableEntries();
+      const target = entries.find(e => e.id === req.params.id);
+      if (!target) return res.status(404).json({ error: 'Lecture not found' });
+      if (entryStatus(target) !== 'OPEN') {
+        return res.status(400).json({ error: 'This lecture is no longer open' });
+      }
+      if (target.teacherId === teacherId) {
+        return res.status(400).json({ error: 'This is your own lecture — use Undo release instead' });
+      }
+
+      const busy = teacherBusyAt(entries, String(teacherId), target.day, target.periodIndex, target.id);
+      if (busy.length > 0 && !force) {
+        const c = busy[0];
+        const [subjects, classes] = await Promise.all([db.getSubjects(), db.getClasses()]);
+        const subj = subjects.find(s => s.id === c.subjectId);
+        const cls = classes.find(cl => cl.id === c.classId);
+        return res.status(409).json({
+          error: 'You already have a class at this time',
+          conflict: {
+            entryId: c.id,
+            subjectName: subj?.name || 'Your class',
+            className: cls?.name || '',
+            day: c.day,
+            periodIndex: c.periodIndex,
+            startTime: c.startTime,
+            endTime: c.endTime,
+          },
+        });
+      }
+
+      if (busy.length > 0) {
+        if (!releaseOwnEntryId) {
+          return res.status(400).json({ error: 'Choose which of your lectures to free for others' });
+        }
+        const own = entries.find(e => e.id === releaseOwnEntryId);
+        if (!own) return res.status(400).json({ error: 'Selected lecture to free was not found' });
+        const isMyScheduled = own.teacherId === teacherId && entryStatus(own) !== 'OPEN';
+        const isMyCover = own.coverTeacherId === teacherId;
+        if (!isMyScheduled && !isMyCover) {
+          return res.status(400).json({ error: 'You can only free your own lecture' });
+        }
+        // Free it for others: own scheduled lecture -> OPEN, held cover -> released
+        own.status = 'OPEN';
+        own.coverTeacherId = null;
+      }
+
+      target.status = 'COVERED';
+      target.coverTeacherId = String(teacherId);
+      await db.saveTimetableEntries(entries);
+      res.json(target);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Give up a lecture I claimed -> back to OPEN
+  app.post('/api/timetable/:id/unclaim', async (req, res) => {
+    try {
+      const { teacherId } = req.body || {};
+      const entries = await db.getTimetableEntries();
+      const target = entries.find(e => e.id === req.params.id);
+      if (!target) return res.status(404).json({ error: 'Lecture not found' });
+      if (target.coverTeacherId !== teacherId) {
+        return res.status(403).json({ error: 'Only the covering teacher can give up this lecture' });
+      }
+      target.status = 'OPEN';
+      target.coverTeacherId = null;
+      await db.saveTimetableEntries(entries);
+      res.json(target);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Mark full-day leave: release all my scheduled lectures on a day
+  app.post('/api/timetable/leave', async (req, res) => {
+    try {
+      const { teacherId, day } = req.body || {};
+      if (!teacherId || !day) return res.status(400).json({ error: 'teacherId and day are required' });
+      const entries = await db.getTimetableEntries();
+      let count = 0;
+      for (const e of entries) {
+        if (e.teacherId === teacherId && e.day === day && entryStatus(e) === 'SCHEDULED') {
+          e.status = 'OPEN';
+          e.coverTeacherId = null;
+          count++;
+        }
+      }
+      await db.saveTimetableEntries(entries);
+      res.json({ success: true, released: count });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Notices feed for students (and teachers): absent -> covered-by / free
+  app.get('/api/notices', async (req, res) => {
+    try {
+      const [entries, teachers, classes, subjects] = await Promise.all([
+        db.getTimetableEntries(),
+        db.getTeachers(),
+        db.getClasses(),
+        db.getSubjects(),
+      ]);
+      const nameOf = (id?: string | null) => teachers.find(t => t.id === id)?.name || 'Unknown teacher';
+      const notices = entries
+        .filter(e => entryStatus(e) === 'OPEN' || entryStatus(e) === 'COVERED')
+        .map(e => {
+          const status = entryStatus(e) as 'OPEN' | 'COVERED';
+          const cls = classes.find(c => c.id === e.classId);
+          const subj = subjects.find(s => s.id === e.subjectId);
+          const absentName = nameOf(e.teacherId);
+          const coverName = e.coverTeacherId ? nameOf(e.coverTeacherId) : null;
+          return {
+            id: `notice_${e.id}`,
+            day: e.day,
+            periodIndex: e.periodIndex,
+            startTime: e.startTime,
+            endTime: e.endTime,
+            classId: e.classId,
+            className: cls?.name || 'Class',
+            subjectId: e.subjectId,
+            subjectName: subj?.name || 'Lecture',
+            absentTeacherId: e.teacherId,
+            absentTeacherName: absentName,
+            status,
+            coverTeacherId: e.coverTeacherId || null,
+            coverTeacherName: coverName,
+            message:
+              status === 'COVERED'
+                ? `${absentName} is absent — Period ${e.periodIndex} (${subj?.name || 'Lecture'}, ${cls?.name || 'class'}) will be taken by ${coverName}.`
+                : `${absentName} is absent — Period ${e.periodIndex} (${subj?.name || 'Lecture'}, ${cls?.name || 'class'}) is FREE, no teacher assigned yet.`,
+          };
+        })
+        .sort((a, b) => a.day.localeCompare(b.day) || a.periodIndex - b.periodIndex);
+      res.json({ notices });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   app.get('/api/timetable/runs', async (req, res) => {
